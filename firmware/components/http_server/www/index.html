@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matter Sniffer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+  header { background: #1a1d2e; border-bottom: 1px solid #2d3748;
+           padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 1.2rem; font-weight: 600; color: #63b3ed; }
+  .badge { padding: 3px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+  .badge-online  { background: #22543d; color: #68d391; }
+  .badge-offline { background: #742a2a; color: #fc8181; }
+  .stats-bar { display: flex; gap: 24px; padding: 12px 24px;
+               background: #141720; border-bottom: 1px solid #2d3748;
+               font-size: 0.85rem; color: #718096; }
+  .stat strong { color: #a0aec0; }
+  .devices { padding: 24px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 10px 12px; font-size: 0.75rem; text-transform: uppercase;
+       letter-spacing: 0.05em; color: #718096; border-bottom: 1px solid #2d3748; }
+  td { padding: 12px; border-bottom: 1px solid #1a1d2e; font-size: 0.875rem; }
+  tr:hover td { background: #1a1d2e; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                margin-right: 6px; }
+  .dot-online  { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
+  .dot-offline { background: #718096; }
+  .chip { display: inline-block; padding: 2px 6px; border-radius: 4px;
+          font-size: 0.7rem; background: #2d3748; color: #a0aec0; margin-right: 3px; }
+  .event-log { position: fixed; bottom: 0; right: 0; width: 340px; max-height: 200px;
+               background: #1a1d2e; border-top: 1px solid #2d3748;
+               border-left: 1px solid #2d3748; overflow-y: auto; font-size: 0.75rem;
+               padding: 8px; font-family: monospace; color: #68d391; }
+  .event-log div { margin-bottom: 2px; }
+  .event-offline { color: #fc8181; }
+  .event-online  { color: #68d391; }
+  .event-updated { color: #63b3ed; }
+  .ws-status { font-size: 0.75rem; color: #718096; margin-left: auto; }
+  .ws-connected { color: #68d391; }
+  .empty { text-align: center; padding: 60px; color: #4a5568; }
+  .rssi-bar { display: inline-block; width: 40px; height: 8px; background: #2d3748;
+              border-radius: 4px; overflow: hidden; }
+  .rssi-fill { height: 100%; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9889; Matter Sniffer</h1>
+  <div id="summary-badges"></div>
+  <span class="ws-status" id="ws-status">&#9679; connecting...</span>
+</header>
+
+<div class="stats-bar" id="stats-bar">
+  <span class="stat">Loading...</span>
+</div>
+
+<div class="devices">
+  <table id="devices-table">
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>Device Name</th>
+        <th>IP Address</th>
+        <th>Type</th>
+        <th>Vendor / Product</th>
+        <th>Fabric / Node</th>
+        <th>RSSI</th>
+      </tr>
+    </thead>
+    <tbody id="devices-body">
+      <tr><td colspan="7" class="empty">Scanning for Matter devices...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="event-log" id="event-log"></div>
+
+<script>
+const devices = {};
+let ws = null;
+
+const DEVICE_TYPES = {
+  '0x0100': 'Light', '0x0101': 'Dimmer', '0x0103': 'CCT Light',
+  '0x010C': 'Color Light', '0x0301': 'Thermostat', '0x0015': 'Contact',
+  '0x0107': 'Occupancy', '0x000A': 'Door Lock', '0x0022': 'Shade',
+  '0x0203': 'Plug',
+};
+
+function rssiColor(rssi) {
+  if (rssi >= -55) return '#48bb78';
+  if (rssi >= -70) return '#ecc94b';
+  if (rssi >= -85) return '#f6ad55';
+  return '#fc8181';
+}
+
+function rssiBar(rssi) {
+  if (!rssi) return '';
+  const pct = Math.max(0, Math.min(100, (rssi + 100) * 2));
+  return `<span class="rssi-bar"><span class="rssi-fill" style="width:${pct}%;background:${rssiColor(rssi)}"></span></span> ${rssi}dBm`;
+}
+
+function dtypeLabel(dtype) {
+  return DEVICE_TYPES[dtype] || dtype || '—';
+}
+
+function renderTable() {
+  const tbody = document.getElementById('devices-body');
+  const list = Object.values(devices);
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Scanning for Matter devices...</td></tr>';
+    return;
+  }
+  list.sort((a,b) => (b.online - a.online) || a.name.localeCompare(b.name));
+  tbody.innerHTML = list.map(d => `
+    <tr>
+      <td><span class="status-dot ${d.online ? 'dot-online' : 'dot-offline'}"></span>
+          <span class="badge ${d.online ? 'badge-online' : 'badge-offline'}">${d.online ? 'online' : 'offline'}</span></td>
+      <td>${escHtml(d.name || '—')}</td>
+      <td><code>${escHtml(d.ip || '—')}</code></td>
+      <td><span class="chip">${dtypeLabel(d.device_type)}</span></td>
+      <td><span class="chip">${escHtml(d.vendor_id || '—')}</span><span class="chip">${escHtml(d.product_id || '—')}</span></td>
+      <td><span class="chip" title="fabric">${escHtml(d.fabric_id || '—').substring(0,8)}</span><span class="chip" title="node">${escHtml(d.node_id || '—').substring(0,8)}</span></td>
+      <td>${rssiBar(d.rssi)}</td>
+    </tr>`).join('');
+
+  const online = list.filter(d => d.online).length;
+  document.getElementById('summary-badges').innerHTML =
+    `<span class="badge badge-online">${online} online</span> ` +
+    `<span class="badge badge-offline">${list.length - online} offline</span>`;
+}
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function logEvent(msg, cls) {
+  const log = document.getElementById('event-log');
+  const now = new Date().toTimeString().split(' ')[0];
+  const div = document.createElement('div');
+  div.className = cls || '';
+  div.textContent = `[${now}] ${msg}`;
+  log.prepend(div);
+  while (log.children.length > 50) log.removeChild(log.lastChild);
+}
+
+function applyEvent(data) {
+  const key = data.name || data.ip;
+  if (!key) return;
+  if (!devices[key]) devices[key] = {};
+  Object.assign(devices[key], {
+    name: data.name, ip: data.ip, mac: data.mac,
+    online: data.online, rssi: data.rssi,
+    vendor_id: data.vendor_id, product_id: data.product_id,
+    device_type: data.device_type,
+    fabric_id: data.fabric_id, node_id: data.node_id,
+  });
+  renderTable();
+
+  const cls = `event-${data.event}`;
+  const msg = data.event === 'discovered' ? `New device: ${data.name}` :
+              data.event === 'offline'     ? `OFFLINE: ${data.name}` :
+              data.event === 'online'      ? `Back online: ${data.name}` :
+              `Updated: ${data.name}`;
+  logEvent(msg, cls);
+}
+
+function connectWS() {
+  const wsUrl = `ws://${location.host}/ws`;
+  ws = new WebSocket(wsUrl);
+  const statusEl = document.getElementById('ws-status');
+
+  ws.onopen = () => {
+    statusEl.textContent = '● live';
+    statusEl.className = 'ws-status ws-connected';
+    loadDevices();
+  };
+  ws.onmessage = (evt) => {
+    try { applyEvent(JSON.parse(evt.data)); } catch(e) {}
+  };
+  ws.onclose = () => {
+    statusEl.textContent = '● reconnecting...';
+    statusEl.className = 'ws-status';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+function loadDevices() {
+  fetch('/api/devices').then(r => r.json()).then(list => {
+    list.forEach(d => { devices[d.name || d.ip] = {...d, online: d.online}; });
+    renderTable();
+  }).catch(() => {});
+
+  fetch('/api/stats').then(r => r.json()).then(s => {
+    document.getElementById('stats-bar').innerHTML =
+      `<span class="stat">Channel <strong>${s.channel}</strong></span>` +
+      `<span class="stat">IP <strong>${s.ip}</strong></span>` +
+      `<span class="stat">Uptime <strong>${Math.floor(s.uptime_s/3600)}h${Math.floor((s.uptime_s%3600)/60)}m</strong></span>` +
+      `<span class="stat">Frames <strong>${s.frames_total}</strong></span>` +
+      `<span class="stat">Matter TCP <strong>${s.frames_matter_tcp}</strong></span>` +
+      `<span class="stat">ARP <strong>${s.frames_arp}</strong></span>`;
+  }).catch(() => {});
+}
+
+connectWS();
+setInterval(loadDevices, 30000);
+</script>
+</body>
+</html>

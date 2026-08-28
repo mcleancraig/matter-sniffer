@@ -1,0 +1,46 @@
+menu "Matter Sniffer Configuration"
+
+    config MATTER_SNIFFER_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            WiFi network to connect to. Can also be set via serial command or web UI.
+
+    config MATTER_SNIFFER_WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        help
+            WiFi password. Can also be set via serial command or web UI.
+
+    config MATTER_SNIFFER_MQTT_HOST
+        string "MQTT Broker Host"
+        default ""
+        help
+            Home Assistant MQTT broker IP address or hostname.
+
+    config MATTER_SNIFFER_MQTT_PORT
+        int "MQTT Broker Port"
+        default 1883
+        help
+            MQTT broker port.
+
+    config MATTER_SNIFFER_MQTT_USER
+        string "MQTT Username"
+        default ""
+        help
+            MQTT broker username (optional).
+
+    config MATTER_SNIFFER_MQTT_PASS
+        string "MQTT Password"
+        default ""
+        help
+            MQTT broker password (optional).
+
+    config MATTER_SNIFFER_PCAP_ENABLED
+        bool "Enable pcap output on startup"
+        default n
+        help
+            If enabled, pcap frames are streamed over USB serial from boot.
+            Can be toggled at runtime via serial command.
+
+endmenu

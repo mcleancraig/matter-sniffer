@@ -1,0 +1,60 @@
+title: Matter Network
+views:
+  - title: Network Overview
+    icon: mdi:network
+    path: matter-network
+    cards:
+
+      # Summary stats from the sniffer
+      - type: entities
+        title: Matter Sniffer Status
+        show_header_toggle: false
+        entities:
+          - entity: sensor.matter_sniffer_summary
+          - type: weblink
+            name: Web UI
+            url: http://matter-sniffer.local/
+            icon: mdi:web
+
+      # Horizontal stack of key metrics
+      - type: horizontal-stack
+        cards:
+          - type: entity
+            entity: sensor.matter_sniffer_online_count
+            name: Online Devices
+            icon: mdi:check-network
+          - type: entity
+            entity: sensor.matter_sniffer_offline_count
+            name: Offline Devices
+            icon: mdi:network-off
+
+      # Auto-entity card — requires custom:auto-entities (HACS)
+      # Shows all entities published by the sniffer
+      - type: custom:auto-entities
+        card:
+          type: entities
+          title: Matter Devices
+          show_header_toggle: false
+        filter:
+          include:
+            - entity_id: sensor.matter_sniffer_*
+              options:
+                secondary_info: last-changed
+        sort:
+          method: state
+          reverse: true
+
+      # Alternatively, if you don't have auto-entities, use a manual list:
+      # - type: entities
+      #   title: Matter Devices (manual)
+      #   entities:
+      #     - sensor.matter_sniffer_<device_name>
+
+      # History graph for availability
+      - type: history-graph
+        title: Device Availability (24h)
+        entities:
+          # Add your discovered device sensors here after first scan
+          # - entity: sensor.matter_sniffer_<device>
+        hours_to_show: 24
+        refresh_interval: 60
