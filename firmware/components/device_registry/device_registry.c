@@ -82,6 +82,7 @@ const device_info_t *device_registry_update(const device_info_t *info)
     if ((src)[0]) strncpy(dst, src, (len) - 1)
 
     COPY_IF_NONEMPTY(entry->name, info->name, DEVICE_NAME_LEN);
+    COPY_IF_NONEMPTY(entry->hostname, info->hostname, DEVICE_NAME_LEN);
     COPY_IF_NONEMPTY(entry->ip, info->ip, DEVICE_IP_LEN);
     COPY_IF_NONEMPTY(entry->mac, info->mac, DEVICE_MAC_LEN);
     COPY_IF_NONEMPTY(entry->fabric_id, info->fabric_id, 17);
@@ -143,11 +144,13 @@ void device_registry_dump(void)
         if (!s_devices[i].in_use) continue;
         device_info_t *d = &s_devices[i];
         printf("[%s] %s\n"
+               "  Host: %s\n"
                "  IP: %s  MAC: %s  RSSI: %ddBm\n"
                "  VID: 0x%04X  PID: 0x%04X  Type: 0x%04X\n"
                "  Fabric: %s  Node: %s\n\n",
                d->is_online ? "ONLINE " : "OFFLINE",
                d->name,
+               d->hostname[0] ? d->hostname : "(unknown)",
                d->ip, d->mac, d->rssi,
                d->vendor_id, d->product_id, d->device_type,
                d->fabric_id, d->node_id);

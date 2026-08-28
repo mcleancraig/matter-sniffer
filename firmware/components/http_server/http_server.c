@@ -5,11 +5,16 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "http_srv";
 static httpd_handle_t s_server = NULL;
@@ -147,6 +152,160 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---- Config helpers ---- */
+
+static void json_get_str_field(const char *json, const char *key, char *out, size_t out_len)
+{
+    *out = '\0';
+    char search[72];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return;
+    p += strlen(search);
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '"') {
+        p++;
+        size_t i = 0;
+        while (*p && *p != '"' && i < out_len - 1) {
+            if (*p == '\\') {
+                p++;
+                if (*p == '"' || *p == '\\' || *p == '/') out[i++] = *p++;
+                else if (*p == 'n') { out[i++] = '\n'; p++; }
+                else if (*p == 't') { out[i++] = '\t'; p++; }
+                else p++;
+            } else {
+                out[i++] = *p++;
+            }
+        }
+        out[i] = '\0';
+    } else {
+        size_t i = 0;
+        while (*p && *p != ',' && *p != '}' && *p != ' ' && i < out_len - 1) {
+            out[i++] = *p++;
+        }
+        out[i] = '\0';
+    }
+}
+
+static esp_err_t api_config_get_handler(httpd_req_t *req)
+{
+    char wifi_ssid[64] = {0};
+    char mqtt_host[64] = {0};
+    char mqtt_user[64] = {0};
+    int32_t mqtt_port = 1883;
+    bool has_wifi_pass = false;
+    bool has_mqtt_pass = false;
+
+    nvs_handle_t h;
+    if (nvs_open("wifi_cfg", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(wifi_ssid);
+        nvs_get_str(h, "ssid", wifi_ssid, &len);
+        char tmp[64] = {0}; len = sizeof(tmp);
+        if (nvs_get_str(h, "pass", tmp, &len) == ESP_OK && tmp[0]) has_wifi_pass = true;
+        nvs_close(h);
+    }
+    if (nvs_open("mqtt_cfg", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(mqtt_host);
+        nvs_get_str(h, "host", mqtt_host, &len);
+        len = sizeof(mqtt_user);
+        nvs_get_str(h, "user", mqtt_user, &len);
+        nvs_get_i32(h, "port", &mqtt_port);
+        char tmp[64] = {0}; len = sizeof(tmp);
+        if (nvs_get_str(h, "pass", tmp, &len) == ESP_OK && tmp[0]) has_mqtt_pass = true;
+        nvs_close(h);
+    }
+
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf),
+        "{"
+        "\"wifi_ssid\":\"%s\","
+        "\"wifi_pass_set\":%s,"
+        "\"mqtt_host\":\"%s\","
+        "\"mqtt_port\":%d,"
+        "\"mqtt_user\":\"%s\","
+        "\"mqtt_pass_set\":%s"
+        "}",
+        wifi_ssid,
+        has_wifi_pass ? "true" : "false",
+        mqtt_host,
+        (int)mqtt_port,
+        mqtt_user,
+        has_mqtt_pass ? "true" : "false");
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, buf, n);
+}
+
+static void do_restart(void *arg) {
+    vTaskDelay(pdMS_TO_TICKS(600));
+    esp_restart();
+}
+
+static esp_err_t api_config_post_handler(httpd_req_t *req)
+{
+    int content_len = req->content_len;
+    if (content_len <= 0 || content_len > 512) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request");
+        return ESP_FAIL;
+    }
+
+    char *body = malloc((size_t)content_len + 1);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    int received = httpd_req_recv(req, body, content_len);
+    if (received <= 0) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "read error");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char wifi_ssid[64] = {0}, wifi_pass[64] = {0};
+    char mqtt_host[64] = {0}, mqtt_user[64] = {0}, mqtt_pass[64] = {0};
+    char mqtt_port_str[8] = {0};
+
+    json_get_str_field(body, "wifi_ssid",  wifi_ssid,     sizeof(wifi_ssid));
+    json_get_str_field(body, "wifi_pass",  wifi_pass,     sizeof(wifi_pass));
+    json_get_str_field(body, "mqtt_host",  mqtt_host,     sizeof(mqtt_host));
+    json_get_str_field(body, "mqtt_port",  mqtt_port_str, sizeof(mqtt_port_str));
+    json_get_str_field(body, "mqtt_user",  mqtt_user,     sizeof(mqtt_user));
+    json_get_str_field(body, "mqtt_pass",  mqtt_pass,     sizeof(mqtt_pass));
+    free(body);
+
+    int mqtt_port = mqtt_port_str[0] ? atoi(mqtt_port_str) : 1883;
+    if (mqtt_port <= 0 || mqtt_port > 65535) mqtt_port = 1883;
+
+    nvs_handle_t h;
+    if (wifi_ssid[0] && nvs_open("wifi_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "ssid", wifi_ssid);
+        if (wifi_pass[0]) nvs_set_str(h, "pass", wifi_pass);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "WiFi config saved: ssid=%s", wifi_ssid);
+    }
+    if (mqtt_host[0] && nvs_open("mqtt_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "host", mqtt_host);
+        nvs_set_str(h, "user", mqtt_user);
+        if (mqtt_pass[0]) nvs_set_str(h, "pass", mqtt_pass);
+        nvs_set_i32(h, "port", (int32_t)mqtt_port);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "MQTT config saved: host=%s:%d user=%s", mqtt_host, mqtt_port, mqtt_user);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\",\"restarting\":true}");
+
+    xTaskCreate(do_restart, "restart", 1024, NULL, 1, NULL);
+    return ESP_OK;
+}
+
 /* ---- Public API ---- */
 
 void http_server_notify_device(const device_info_t *dev, device_event_t event)
@@ -213,11 +372,23 @@ void http_server_init(void)
         .handler     = ws_handler,
         .is_websocket = true,
     };
+    static const httpd_uri_t uri_config_get = {
+        .uri     = "/api/config",
+        .method  = HTTP_GET,
+        .handler = api_config_get_handler,
+    };
+    static const httpd_uri_t uri_config_post = {
+        .uri     = "/api/config",
+        .method  = HTTP_POST,
+        .handler = api_config_post_handler,
+    };
 
     httpd_register_uri_handler(s_server, &uri_index);
     httpd_register_uri_handler(s_server, &uri_devices);
     httpd_register_uri_handler(s_server, &uri_stats);
     httpd_register_uri_handler(s_server, &uri_ws);
+    httpd_register_uri_handler(s_server, &uri_config_get);
+    httpd_register_uri_handler(s_server, &uri_config_post);
 
     ESP_LOGI(TAG, "HTTP server running on port 80");
 }

@@ -44,6 +44,34 @@
   .rssi-bar { display: inline-block; width: 40px; height: 8px; background: #2d3748;
               border-radius: 4px; overflow: hidden; }
   .rssi-fill { height: 100%; border-radius: 4px; }
+  .btn-cfg { background: none; border: 1px solid #4a5568; color: #a0aec0; border-radius: 6px;
+             padding: 5px 10px; cursor: pointer; font-size: 0.8rem; }
+  .btn-cfg:hover { background: #2d3748; }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+                   z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: #1a1d2e; border: 1px solid #2d3748; border-radius: 10px;
+           padding: 28px; width: 420px; max-width: 95vw; }
+  .modal h2 { font-size: 1rem; color: #63b3ed; margin-bottom: 20px; }
+  .modal h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
+              color: #718096; margin: 16px 0 8px; }
+  .form-row { margin-bottom: 10px; }
+  .form-row label { display: block; font-size: 0.8rem; color: #a0aec0; margin-bottom: 4px; }
+  .form-row input { width: 100%; background: #0f1117; border: 1px solid #2d3748; border-radius: 5px;
+                    color: #e2e8f0; padding: 7px 10px; font-size: 0.875rem; }
+  .form-row input:focus { outline: none; border-color: #63b3ed; }
+  .form-row input::placeholder { color: #4a5568; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+  .btn-save { flex: 1; background: #2b6cb0; color: #fff; border: none; border-radius: 6px;
+              padding: 9px; cursor: pointer; font-size: 0.875rem; }
+  .btn-save:hover { background: #2c5282; }
+  .btn-cancel { flex: 1; background: #2d3748; color: #a0aec0; border: none; border-radius: 6px;
+                padding: 9px; cursor: pointer; font-size: 0.875rem; }
+  .btn-cancel:hover { background: #4a5568; }
+  .modal-warn { font-size: 0.75rem; color: #718096; margin-top: 12px; text-align: center; }
+  .modal-msg { font-size: 0.875rem; text-align: center; padding: 10px; border-radius: 6px; margin-top: 12px; }
+  .modal-msg.ok { background: #22543d; color: #68d391; }
+  .modal-msg.err { background: #742a2a; color: #fc8181; }
 </style>
 </head>
 <body>
@@ -51,8 +79,47 @@
 <header>
   <h1>&#9889; Matter Sniffer</h1>
   <div id="summary-badges"></div>
+  <button class="btn-cfg" onclick="openConfig()" title="Configure WiFi &amp; MQTT">&#9881; Config</button>
   <span class="ws-status" id="ws-status">&#9679; connecting...</span>
 </header>
+
+<div class="modal-overlay" id="cfg-modal">
+  <div class="modal">
+    <h2>&#9881; Device Configuration</h2>
+    <h3>WiFi</h3>
+    <div class="form-row">
+      <label>SSID</label>
+      <input id="cfg-ssid" type="text" placeholder="Network name" autocomplete="off">
+    </div>
+    <div class="form-row">
+      <label>Password</label>
+      <input id="cfg-wifi-pass" type="password" placeholder="Leave blank to keep existing">
+    </div>
+    <h3>MQTT Broker</h3>
+    <div class="form-row">
+      <label>Host</label>
+      <input id="cfg-mqtt-host" type="text" placeholder="192.168.1.100" autocomplete="off">
+    </div>
+    <div class="form-row">
+      <label>Port</label>
+      <input id="cfg-mqtt-port" type="number" placeholder="1883" min="1" max="65535">
+    </div>
+    <div class="form-row">
+      <label>Username</label>
+      <input id="cfg-mqtt-user" type="text" placeholder="Optional" autocomplete="off">
+    </div>
+    <div class="form-row">
+      <label>Password</label>
+      <input id="cfg-mqtt-pass" type="password" placeholder="Leave blank to keep existing">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-save" id="cfg-save-btn" onclick="saveConfig()">Save &amp; Restart</button>
+      <button class="btn-cancel" onclick="closeConfig()">Cancel</button>
+    </div>
+    <div class="modal-warn">Saving will restart the device (~5 seconds).</div>
+    <div class="modal-msg" id="cfg-msg" style="display:none"></div>
+  </div>
+</div>
 
 <div class="stats-bar" id="stats-bar">
   <span class="stat">Loading...</span>
@@ -206,6 +273,69 @@ function loadDevices() {
       `<span class="stat">ARP <strong>${s.frames_arp}</strong></span>`;
   }).catch(() => {});
 }
+
+function openConfig() {
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    document.getElementById('cfg-ssid').value = cfg.wifi_ssid || '';
+    document.getElementById('cfg-wifi-pass').value = '';
+    document.getElementById('cfg-wifi-pass').placeholder = cfg.wifi_pass_set ? 'Leave blank to keep existing' : 'Enter password';
+    document.getElementById('cfg-mqtt-host').value = cfg.mqtt_host || '';
+    document.getElementById('cfg-mqtt-port').value = cfg.mqtt_port || 1883;
+    document.getElementById('cfg-mqtt-user').value = cfg.mqtt_user || '';
+    document.getElementById('cfg-mqtt-pass').value = '';
+    document.getElementById('cfg-mqtt-pass').placeholder = cfg.mqtt_pass_set ? 'Leave blank to keep existing' : 'Optional';
+    document.getElementById('cfg-msg').style.display = 'none';
+    document.getElementById('cfg-save-btn').disabled = false;
+    document.getElementById('cfg-save-btn').textContent = 'Save & Restart';
+    document.getElementById('cfg-modal').classList.add('open');
+  }).catch(() => {
+    document.getElementById('cfg-modal').classList.add('open');
+  });
+}
+
+function closeConfig() {
+  document.getElementById('cfg-modal').classList.remove('open');
+}
+
+function saveConfig() {
+  const payload = {
+    wifi_ssid:  document.getElementById('cfg-ssid').value.trim(),
+    wifi_pass:  document.getElementById('cfg-wifi-pass').value,
+    mqtt_host:  document.getElementById('cfg-mqtt-host').value.trim(),
+    mqtt_port:  parseInt(document.getElementById('cfg-mqtt-port').value) || 1883,
+    mqtt_user:  document.getElementById('cfg-mqtt-user').value.trim(),
+    mqtt_pass:  document.getElementById('cfg-mqtt-pass').value,
+  };
+
+  const btn = document.getElementById('cfg-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(data => {
+    if (data.status === 'ok') {
+      const msg = document.getElementById('cfg-msg');
+      msg.className = 'modal-msg ok';
+      msg.textContent = 'Saved! Device is restarting...';
+      msg.style.display = 'block';
+      btn.textContent = 'Restarting...';
+    }
+  }).catch(() => {
+    const msg = document.getElementById('cfg-msg');
+    msg.className = 'modal-msg err';
+    msg.textContent = 'Error saving config. Check connection.';
+    msg.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Save & Restart';
+  });
+}
+
+document.getElementById('cfg-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeConfig();
+});
 
 connectWS();
 setInterval(loadDevices, 30000);

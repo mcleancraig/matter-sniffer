@@ -10,6 +10,7 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "lwip/igmp.h"
+#include "lwip/dns.h"
 #include "esp_log.h"
 
 #define MDNS_PORT       5353
@@ -156,9 +157,22 @@ static bool parse_rr(const uint8_t *pkt, int pkt_len, int *pos,
     case 16: /* TXT record */
         parse_matter_txt(rdata, rdlen, dev_out);
         break;
-    case 33: /* SRV record */
+    case 33: /* SRV record — priority(2) + weight(2) + port(2) + target(name) */
         if (rdlen >= 7) {
             dev_out->port = (uint16_t)(rdata[4] << 8 | rdata[5]);
+            /* Extract target hostname (offset 6 into rdata) */
+            char srv_target[DEVICE_NAME_LEN] = {0};
+            int target_offset = (int)(rdata + 6 - pkt);
+            if (target_offset >= 0 && target_offset < pkt_len) {
+                dns_name_expand(pkt, pkt_len, target_offset,
+                                srv_target, sizeof(srv_target));
+                /* Strip trailing ".local" suffix for display */
+                char *dot_local = strstr(srv_target, ".local");
+                if (dot_local) *dot_local = '\0';
+                if (srv_target[0]) {
+                    strncpy(dev_out->hostname, srv_target, DEVICE_NAME_LEN - 1);
+                }
+            }
         }
         break;
     case 12: /* PTR record */
@@ -306,6 +320,153 @@ static int build_mdns_query(uint8_t *buf, int buf_size, const char *service)
     return pos;
 }
 
+/* Send a unicast DNS PTR query to the system DNS server.
+ * Resolves an IPv4 address to a hostname. Returns true on success. */
+static bool dns_ptr_query(const char *ip, char *hostname, size_t hostname_len)
+{
+    *hostname = '\0';
+
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip, &addr) != 1) return false;
+
+    /* Get configured DNS server */
+    const ip_addr_t *dns_srv = dns_getserver(0);
+    if (!dns_srv || dns_srv->u_addr.ip4.addr == 0) return false;
+
+    /* Build reversed PTR name: x.x.x.x.in-addr.arpa */
+    uint8_t b0 = addr.s_addr & 0xFF;
+    uint8_t b1 = (addr.s_addr >> 8) & 0xFF;
+    uint8_t b2 = (addr.s_addr >> 16) & 0xFF;
+    uint8_t b3 = (addr.s_addr >> 24) & 0xFF;
+    char arpa[64];
+    snprintf(arpa, sizeof(arpa), "%d.%d.%d.%d.in-addr.arpa", b0, b1, b2, b3);
+
+    /* Build DNS query packet */
+    uint8_t qbuf[256];
+    qbuf[0] = 0x12; qbuf[1] = 0x34;  /* transaction ID */
+    qbuf[2] = 0x01; qbuf[3] = 0x00;  /* standard query, recursion desired */
+    qbuf[4] = 0x00; qbuf[5] = 0x01;  /* 1 question */
+    qbuf[6] = 0x00; qbuf[7] = 0x00;
+    qbuf[8] = 0x00; qbuf[9] = 0x00;
+    qbuf[10] = 0x00; qbuf[11] = 0x00;
+    int pos = 12;
+
+    char tmp[64];
+    strncpy(tmp, arpa, sizeof(tmp) - 1);
+    char *p = tmp;
+    while (*p) {
+        char *dot = strchr(p, '.');
+        int llen = dot ? (int)(dot - p) : (int)strlen(p);
+        if (pos + 1 + llen + 5 > (int)sizeof(qbuf)) return false;
+        qbuf[pos++] = (uint8_t)llen;
+        memcpy(qbuf + pos, p, llen);
+        pos += llen;
+        if (!dot) break;
+        p = dot + 1;
+    }
+    qbuf[pos++] = 0x00;
+    qbuf[pos++] = 0x00; qbuf[pos++] = 0x0C;  /* QTYPE PTR */
+    qbuf[pos++] = 0x00; qbuf[pos++] = 0x01;  /* QCLASS IN */
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return false;
+
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(53);
+    dst.sin_addr.s_addr = dns_srv->u_addr.ip4.addr;  /* network byte order */
+
+    if (sendto(sock, qbuf, pos, 0, (struct sockaddr *)&dst, sizeof(dst)) <= 0) {
+        close(sock);
+        return false;
+    }
+
+    uint8_t resp[512];
+    int rlen = recv(sock, resp, sizeof(resp), 0);
+    close(sock);
+
+    if (rlen < 12) return false;
+    if (resp[0] != 0x12 || resp[1] != 0x34) return false;
+    uint16_t flags = (uint16_t)(resp[2] << 8 | resp[3]);
+    if (!(flags & 0x8000) || (flags & 0x000F)) return false;  /* not response or error */
+
+    int qdcount = (resp[4] << 8 | resp[5]);
+    int ancount = (resp[6] << 8 | resp[7]);
+    if (!ancount) return false;
+
+    /* Skip question section */
+    int rpos = 12;
+    for (int q = 0; q < qdcount && rpos < rlen; q++) {
+        while (rpos < rlen) {
+            uint8_t label = resp[rpos];
+            if (label == 0) { rpos++; break; }
+            if ((label & 0xC0) == 0xC0) { rpos += 2; break; }
+            rpos += 1 + label;
+        }
+        rpos += 4;
+    }
+
+    /* Parse answer records looking for PTR (type 12) */
+    for (int a = 0; a < ancount && rpos < rlen; a++) {
+        while (rpos < rlen) {
+            uint8_t label = resp[rpos];
+            if (label == 0) { rpos++; break; }
+            if ((label & 0xC0) == 0xC0) { rpos += 2; break; }
+            rpos += 1 + label;
+        }
+        if (rpos + 10 > rlen) break;
+        uint16_t rtype = (uint16_t)(resp[rpos] << 8 | resp[rpos + 1]);
+        uint16_t rdlen = (uint16_t)(resp[rpos + 8] << 8 | resp[rpos + 9]);
+        rpos += 10;
+        if (rtype == 12 && rpos + rdlen <= rlen) {
+            char result[DEVICE_NAME_LEN] = {0};
+            dns_name_expand(resp, rlen, rpos, result, sizeof(result));
+            if (result[0]) {
+                char *dot_local = strstr(result, ".local");
+                if (dot_local) *dot_local = '\0';
+                size_t l = strlen(result);
+                if (l > 0 && result[l - 1] == '.') result[l - 1] = '\0';
+                strncpy(hostname, result, hostname_len - 1);
+            }
+            return hostname[0] != '\0';
+        }
+        rpos += rdlen;
+    }
+    return false;
+}
+
+/* Background task: periodically try reverse DNS for devices with no hostname */
+static void reverse_dns_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(15000));  /* wait for network to settle */
+
+    while (1) {
+        int idx = 0;
+        const device_info_t *dev;
+        while ((dev = device_registry_next(&idx)) != NULL) {
+            if (dev->hostname[0] || !dev->ip[0]) continue;
+
+            struct in_addr tmp;
+            if (inet_pton(AF_INET, dev->ip, &tmp) != 1) continue;  /* skip IPv6 */
+
+            char resolved[DEVICE_NAME_LEN] = {0};
+            if (dns_ptr_query(dev->ip, resolved, sizeof(resolved))) {
+                device_info_t update = {0};
+                strncpy(update.ip, dev->ip, DEVICE_IP_LEN - 1);
+                strncpy(update.hostname, resolved, DEVICE_NAME_LEN - 1);
+                device_registry_update(&update);
+                ESP_LOGI(TAG, "reverse DNS: %s -> %s", dev->ip, resolved);
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
 static void mdns_listen_task(void *arg)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -400,5 +561,6 @@ static void mdns_listen_task(void *arg)
 void mdns_scanner_init(void)
 {
     xTaskCreate(mdns_listen_task, "mdns_listen", 8192, NULL, 4, NULL);
+    xTaskCreate(reverse_dns_task, "rdns", 4096, NULL, 2, NULL);
     ESP_LOGI(TAG, "mDNS scanner started");
 }

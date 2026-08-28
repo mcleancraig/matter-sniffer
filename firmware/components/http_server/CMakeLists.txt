@@ -9,6 +9,8 @@ idf_component_register(
         packet_sniffer
         wifi_manager
         esp_timer
+        nvs_flash
+        esp_system
     EMBED_FILES
         www/index.html
 )

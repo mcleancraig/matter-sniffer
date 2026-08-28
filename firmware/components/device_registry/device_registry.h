@@ -17,6 +17,7 @@
 
 typedef struct {
     char     name[DEVICE_NAME_LEN];      /* mDNS service instance name */
+    char     hostname[DEVICE_NAME_LEN];  /* mDNS hostname from SRV target, or reverse-DNS result */
     char     ip[DEVICE_IP_LEN];
     char     mac[DEVICE_MAC_LEN];
     uint16_t vendor_id;
