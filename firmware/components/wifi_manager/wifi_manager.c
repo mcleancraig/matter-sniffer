@@ -47,8 +47,12 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             s_retry_count++;
             ESP_LOGW(TAG, "retrying connection (%d/%d)", s_retry_count, MAX_RETRY);
         } else {
+            /* Signal the boot-path waiter that initial connection failed,
+             * then reset the counter so future disconnect events (e.g. after
+             * a transient network outage) will retry rather than staying down. */
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-            ESP_LOGE(TAG, "connection failed");
+            s_retry_count = 0;
+            ESP_LOGE(TAG, "connection failed — check credentials or AP availability");
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;

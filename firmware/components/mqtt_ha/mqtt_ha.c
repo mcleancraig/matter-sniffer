@@ -79,6 +79,10 @@ static void do_init(const char *host, int port, const char *user, const char *pa
     };
 
     s_client = esp_mqtt_client_init(&cfg);
+    if (!s_client) {
+        ESP_LOGE(TAG, "MQTT client init failed (OOM or bad config)");
+        return;
+    }
     esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(s_client);
 
@@ -140,6 +144,16 @@ void mqtt_ha_publish_device(const device_info_t *dev, device_event_t event)
 
     if (event == DEVICE_EVENT_DISCOVERED) {
         /* HA MQTT auto-discovery config message */
+        char esc_name[DEVICE_NAME_LEN * 2];
+        /* Escape the mDNS-derived name before embedding in JSON */
+        size_t j = 0;
+        for (size_t i = 0; dev->name[i] && j + 3 < sizeof(esc_name); i++) {
+            unsigned char c = (unsigned char)dev->name[i];
+            if (c == '"' || c == '\\') { esc_name[j++] = '\\'; esc_name[j++] = (char)c; }
+            else if (c >= 0x20)        { esc_name[j++] = (char)c; }
+        }
+        esc_name[j] = '\0';
+
         char payload[1024];
         snprintf(payload, sizeof(payload),
             "{"
@@ -155,13 +169,13 @@ void mqtt_ha_publish_device(const device_info_t *dev, device_event_t event)
               "\"manufacturer\":\"Matter\""
             "}"
             "}",
-            dev->name,
+            esc_name,
             uid,
             TOPIC_PREFIX, uid,
             TOPIC_PREFIX, uid,
             TOPIC_PREFIX, uid,
             uid,
-            dev->name,
+            esc_name,
             device_type_str(dev->device_type),
             dev->vendor_id, dev->product_id);
 

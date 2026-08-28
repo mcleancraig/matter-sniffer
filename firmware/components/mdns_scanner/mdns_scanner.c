@@ -42,6 +42,7 @@ static int dns_name_expand(const uint8_t *pkt, int pkt_len, int start,
     int buf_pos = 0;
     int followed_ptr = 0;
     int consumed = -1;  /* bytes consumed at original position */
+    int ptr_hops = 0;
 
     while (pos < pkt_len) {
         uint8_t len = pkt[pos];
@@ -52,8 +53,9 @@ static int dns_name_expand(const uint8_t *pkt, int pkt_len, int start,
             return consumed;
         }
         if ((len & 0xC0) == 0xC0) {
-            /* Pointer */
+            /* Pointer — guard against loops in malformed/malicious responses */
             if (pos + 1 >= pkt_len) return -1;
+            if (++ptr_hops > 16) return -1;
             if (!followed_ptr) consumed = pos - start + 2;
             pos = ((len & 0x3F) << 8) | pkt[pos + 1];
             followed_ptr = 1;

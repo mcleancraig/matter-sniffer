@@ -31,7 +31,7 @@ static SemaphoreHandle_t s_ws_mutex;
 static void ws_send_all(const char *json, int len)
 {
     if (!s_server) return;
-    xSemaphoreTake(s_ws_mutex, pdMS_TO_TICKS(50));
+    if (xSemaphoreTake(s_ws_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_fds[i] <= 0) continue;
         httpd_ws_frame_t ws_pkt = {
@@ -44,6 +44,28 @@ static void ws_send_all(const char *json, int len)
         }
     }
     xSemaphoreGive(s_ws_mutex);
+}
+
+/* ---- Helpers ---- */
+
+/* Escape a string for safe embedding in a JSON string literal.
+ * Handles " and \ which would break JSON structure; strips C0 controls.
+ * Returns number of bytes written to out (excluding NUL). */
+static int json_escape(char *out, size_t out_len, const char *in)
+{
+    size_t j = 0;
+    for (size_t i = 0; in[i] && j + 3 < out_len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[j++] = '\\';
+            out[j++] = (char)c;
+        } else if (c >= 0x20) {
+            out[j++] = (char)c;
+        }
+        /* strip control chars — they have no place in a device name */
+    }
+    out[j] = '\0';
+    return (int)j;
 }
 
 /* ---- Handlers ---- */
@@ -64,6 +86,8 @@ static esp_err_t api_devices_handler(httpd_req_t *req)
     const device_info_t *dev;
     bool first = true;
     while ((dev = device_registry_next(&idx)) != NULL) {
+        char esc_name[DEVICE_NAME_LEN * 2];
+        json_escape(esc_name, sizeof(esc_name), dev->name);
         char buf[512];
         int n = snprintf(buf, sizeof(buf),
             "%s{"
@@ -80,7 +104,7 @@ static esp_err_t api_devices_handler(httpd_req_t *req)
             "\"port\":%d"
             "}",
             first ? "" : ",",
-            dev->name, dev->ip, dev->mac,
+            esc_name, dev->ip, dev->mac,
             dev->is_online ? "true" : "false",
             dev->rssi,
             dev->vendor_id, dev->product_id, dev->device_type,
@@ -310,6 +334,8 @@ static esp_err_t api_config_post_handler(httpd_req_t *req)
 
 void http_server_notify_device(const device_info_t *dev, device_event_t event)
 {
+    char esc_name[DEVICE_NAME_LEN * 2];
+    json_escape(esc_name, sizeof(esc_name), dev->name);
     char json[512];
     int n = snprintf(json, sizeof(json),
         "{"
@@ -328,7 +354,7 @@ void http_server_notify_device(const device_info_t *dev, device_event_t event)
         event == DEVICE_EVENT_DISCOVERED ? "discovered" :
         event == DEVICE_EVENT_ONLINE ? "online" :
         event == DEVICE_EVENT_OFFLINE ? "offline" : "updated",
-        dev->name, dev->ip, dev->mac,
+        esc_name, dev->ip, dev->mac,
         dev->is_online ? "true" : "false",
         dev->rssi,
         dev->vendor_id, dev->product_id, dev->device_type,
