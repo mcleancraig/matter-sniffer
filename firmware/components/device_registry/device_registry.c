@@ -102,9 +102,12 @@ const device_info_t *device_registry_update(const device_info_t *info)
                            was_offline ? DEVICE_EVENT_ONLINE :
                            DEVICE_EVENT_UPDATED;
 
-    if (s_cb) s_cb(entry, event);
-
+    /* Copy entry before releasing lock so callback runs outside the mutex.
+     * Holding the mutex during I/O-heavy callbacks (MQTT publish, WebSocket
+     * send) blocks every other registry operation for an unbounded duration. */
+    device_info_t snap = *entry;
     xSemaphoreGive(s_mutex);
+    if (s_cb) s_cb(&snap, event);
     return entry;
 }
 
@@ -171,18 +174,22 @@ const device_info_t *device_registry_next(int *idx)
 
 int device_registry_count(void)
 {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     int n = 0;
     for (int i = 0; i < DEVICE_MAX; i++) {
         if (s_devices[i].in_use) n++;
     }
+    xSemaphoreGive(s_mutex);
     return n;
 }
 
 int device_registry_online_count(void)
 {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     int n = 0;
     for (int i = 0; i < DEVICE_MAX; i++) {
         if (s_devices[i].in_use && s_devices[i].is_online) n++;
     }
+    xSemaphoreGive(s_mutex);
     return n;
 }
