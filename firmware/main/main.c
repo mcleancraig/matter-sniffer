@@ -8,6 +8,10 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "led_strip.h"
+
+#define LED_GPIO   48
+#define LED_BRIGHT 3    /* near WS2812 minimum threshold */
 
 #include "wifi_manager.h"
 #include "packet_sniffer.h"
@@ -96,8 +100,28 @@ static void handle_serial_commands(void *arg)
     }
 }
 
+static void led_init(void)
+{
+    led_strip_config_t cfg = {
+        .strip_gpio_num = LED_GPIO,
+        .max_leds       = 1,
+        .led_model      = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+    };
+    led_strip_rmt_config_t rmt_cfg = {
+        .resolution_hz = 10 * 1000 * 1000,  /* 10 MHz */
+    };
+    led_strip_handle_t strip;
+    if (led_strip_new_rmt_device(&cfg, &rmt_cfg, &strip) == ESP_OK) {
+        led_strip_clear(strip);
+        led_strip_refresh(strip);
+    }
+}
+
 void app_main(void)
 {
+    led_init();
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
