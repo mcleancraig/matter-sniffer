@@ -37,6 +37,8 @@ static void handle_serial_commands(void *arg)
             continue;
         }
         if (c == '\r' || c == '\n') {
+            putchar('\n');
+            fflush(stdout);
             if (pos > 0) {
                 buf[pos] = '\0';
                 if (strcmp(buf, "pcap on") == 0) {
@@ -54,19 +56,23 @@ static void handle_serial_commands(void *arg)
                 } else if (strcmp(buf, "devices") == 0) {
                     device_registry_dump();
                 } else if (strncmp(buf, "CONFIG ", 7) == 0) {
-                    /* FORMAT: CONFIG ssid:pass:mqtt_host */
+                    /* FORMAT: CONFIG ssid:pass:mqtt_host[:mqtt_user:mqtt_pass] */
                     char *p = buf + 7;
-                    char *ssid = strsep(&p, ":");
-                    char *pass = strsep(&p, ":");
-                    char *mqtt = p;
-                    if (ssid && pass && mqtt) {
+                    char *ssid      = strsep(&p, ":");
+                    char *pass      = strsep(&p, ":");
+                    char *mqtt_host = strsep(&p, ":");
+                    char *mqtt_user = p ? strsep(&p, ":") : NULL;
+                    char *mqtt_pass = p;  /* remainder, may be NULL */
+                    if (ssid && pass && mqtt_host) {
                         wifi_manager_set_credentials(ssid, pass);
-                        mqtt_ha_set_broker(mqtt, 1883, "", "");
+                        mqtt_ha_set_broker(mqtt_host, 1883,
+                                           mqtt_user ? mqtt_user : "",
+                                           mqtt_pass ? mqtt_pass : "");
                         printf("Config saved, restarting...\n");
                         vTaskDelay(pdMS_TO_TICKS(500));
                         esp_restart();
                     } else {
-                        printf("Usage: CONFIG ssid:password:mqtt_host\n");
+                        printf("Usage: CONFIG ssid:pass:mqtt_host[:mqtt_user:mqtt_pass]\n");
                     }
                 } else if (strcmp(buf, "restart") == 0) {
                     esp_restart();
@@ -75,8 +81,17 @@ static void handle_serial_commands(void *arg)
                 }
                 pos = 0;
             }
+        } else if (c == 127 || c == 8) {
+            /* backspace / delete */
+            if (pos > 0) {
+                pos--;
+                printf("\b \b");
+                fflush(stdout);
+            }
         } else if (pos < (int)sizeof(buf) - 1) {
             buf[pos++] = (char)c;
+            putchar(c);
+            fflush(stdout);
         }
     }
 }

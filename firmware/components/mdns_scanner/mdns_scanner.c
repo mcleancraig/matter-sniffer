@@ -97,10 +97,11 @@ static void parse_matter_txt(const uint8_t *rdata, int rdata_len,
         *eq = '\0';
         char *val = eq + 1;
 
-        if (strcmp(kv, "D") == 0) {
+        if (strcmp(kv, "D") == 0 || strcmp(kv, "DT") == 0) {
+            /* D= in commissioning records, DT= in some operational records */
             dev->device_type = (uint16_t)strtoul(val, NULL, 10);
         } else if (strcmp(kv, "VP") == 0) {
-            /* VP=<vid>+<pid> */
+            /* VP=<vid>+<pid> — commissioning records only */
             char *plus = strchr(val, '+');
             if (plus) {
                 *plus = '\0';
@@ -262,9 +263,14 @@ static void parse_mdns_packet(const uint8_t *pkt, int pkt_len)
         }
         const device_info_t *stored = device_registry_update(&dev);
         if (stored) {
-            ESP_LOGI(TAG, "device: %s  IP: %s  VID:0x%04X PID:0x%04X Type:0x%04X",
-                     stored->name, stored->ip,
-                     stored->vendor_id, stored->product_id, stored->device_type);
+            if (stored->vendor_id || stored->product_id || stored->device_type) {
+                ESP_LOGI(TAG, "device: %s  IP: %s  VID:0x%04X PID:0x%04X Type:0x%04X",
+                         stored->name, stored->ip,
+                         stored->vendor_id, stored->product_id, stored->device_type);
+            } else {
+                ESP_LOGI(TAG, "device: %s  IP: %s  (operational record — no VID/PID)",
+                         stored->name, stored->ip);
+            }
         }
     }
 }

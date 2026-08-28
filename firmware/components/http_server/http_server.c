@@ -185,7 +185,7 @@ void http_server_init(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_open_sockets = 8;
+    config.max_open_sockets = 4;  /* lwIP default allows 10 sockets; httpd uses 3 internally */
 
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start HTTP server");

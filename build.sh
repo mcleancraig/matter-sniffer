@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 ESPRESSIF_DIR="$HOME/.espressif"
 IDF_PATH="$ESPRESSIF_DIR/v6.0/esp-idf"
 PYTHON="$ESPRESSIF_DIR/tools/python/v6.0/venv/bin/python"
 FIRMWARE_DIR="$(cd "$(dirname "$0")/firmware" && pwd)"
 
-if [ ! -d "$IDF_PATH" ]; then
-    echo "ESP-IDF not found at $IDF_PATH"
+if [ ! -f "$PYTHON" ]; then
+    echo "Error: Python venv not found at $PYTHON"
     exit 1
 fi
-
-# Activate environment
-source "$ESPRESSIF_DIR/tools/activate_idf_v6.0.sh" > /dev/null 2>&1 || true
+if [ ! -d "$IDF_PATH" ]; then
+    echo "Error: ESP-IDF not found at $IDF_PATH"
+    exit 1
+fi
 
 export IDF_PATH
 export IDF_TOOLS_PATH="$ESPRESSIF_DIR/tools"
@@ -20,48 +21,43 @@ export IDF_PYTHON_ENV_PATH="$ESPRESSIF_DIR/tools/python/v6.0/venv"
 export ESP_IDF_VERSION="6.0.0"
 export IDF_COMPONENT_LOCAL_STORAGE_URL="file://$ESPRESSIF_DIR/tools"
 
-# Prepend tool paths
-TOOL_BIN="$ESPRESSIF_DIR/tools/xtensa-esp-elf/$(ls $ESPRESSIF_DIR/tools/xtensa-esp-elf 2>/dev/null | head -1)/xtensa-esp-elf/bin"
-export PATH="$TOOL_BIN:$ESPRESSIF_DIR/tools/ninja/$(ls $ESPRESSIF_DIR/tools/ninja 2>/dev/null | head -1):$IDF_PATH/tools:$PATH"
+_find_tool_ver() { ls "$ESPRESSIF_DIR/tools/$1" 2>/dev/null | sort -V | tail -1; }
+XTENSA_VER=$(_find_tool_ver "xtensa-esp-elf")
+NINJA_VER=$(_find_tool_ver "ninja")
 
-IDF="$PYTHON $IDF_PATH/tools/idf.py"
+export PATH="$ESPRESSIF_DIR/tools/xtensa-esp-elf/$XTENSA_VER/xtensa-esp-elf/bin:$ESPRESSIF_DIR/tools/ninja/$NINJA_VER:$IDF_PATH/tools:$PATH"
+
+idf() { "$PYTHON" "$IDF_PATH/tools/idf.py" -C "$FIRMWARE_DIR" "$@"; }
+
 TARGET="${IDF_TARGET:-esp32s3}"
-
 CMD="${1:-build}"
 
 case "$CMD" in
     build)
         echo "Building for $TARGET..."
-        $IDF -C "$FIRMWARE_DIR" set-target "$TARGET"
-        $IDF -C "$FIRMWARE_DIR" build
+        idf set-target "$TARGET"
+        idf build
         echo ""
         echo "Build complete: firmware/build/matter_sniffer.bin"
         ;;
     flash)
-        PORT="${2:-}"
-        if [ -z "$PORT" ]; then
-            PORT=$(ls /dev/tty.usbmodem* /dev/ttyUSB* 2>/dev/null | head -1)
-            echo "Auto-detected port: $PORT"
-        fi
-        $IDF -C "$FIRMWARE_DIR" -p "$PORT" flash
+        PORT="${2:-$(ls /dev/tty.usbmodem* /dev/ttyUSB* 2>/dev/null | head -1)}"
+        echo "Flashing to $PORT"
+        idf -p "$PORT" flash
         ;;
     monitor)
-        PORT="${2:-}"
-        if [ -z "$PORT" ]; then
-            PORT=$(ls /dev/tty.usbmodem* /dev/ttyUSB* 2>/dev/null | head -1)
-        fi
-        $IDF -C "$FIRMWARE_DIR" -p "$PORT" monitor
+        PORT="${2:-$(ls /dev/tty.usbmodem* /dev/ttyUSB* 2>/dev/null | head -1)}"
+        echo "Monitoring $PORT — Ctrl-C to exit"
+        "$PYTHON" -m serial.tools.miniterm --exit-char 3 --eol LF "$PORT" 115200
         ;;
     flash-monitor)
-        PORT="${2:-}"
-        if [ -z "$PORT" ]; then
-            PORT=$(ls /dev/tty.usbmodem* /dev/ttyUSB* 2>/dev/null | head -1)
-            echo "Auto-detected port: $PORT"
-        fi
-        $IDF -C "$FIRMWARE_DIR" -p "$PORT" flash monitor
+        PORT="${2:-$(ls /dev/tty.usbmodem* /dev/ttyUSB* 2>/dev/null | head -1)}"
+        echo "Flashing and monitoring on $PORT — Ctrl-C to exit monitor"
+        idf -p "$PORT" flash
+        "$PYTHON" -m serial.tools.miniterm --exit-char 3 --eol LF "$PORT" 115200
         ;;
     menuconfig)
-        $IDF -C "$FIRMWARE_DIR" menuconfig
+        idf menuconfig
         ;;
     clean)
         rm -rf "$FIRMWARE_DIR/build"
